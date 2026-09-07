@@ -12,6 +12,7 @@ class VerificationResult:
         self.record_hash = ""
         self.blockchain = None
         self.social_profiles: dict = {}
+        self.profile_face_checks: list = []
 
         self._compute_hash()
 
@@ -51,4 +52,5 @@ class VerificationResult:
             "timestamp": self.timestamp,
             "blockchain": self.blockchain,
             "social_profiles": self.social_profiles,
+            "profile_face_checks": self.profile_face_checks,
         }

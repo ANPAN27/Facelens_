@@ -129,6 +129,17 @@ python main.py search --image person.jpg --name "Tushar Pamnani"
 When no web image matches the face, the tool asks for the person's name on the
 terminal (if run interactively) so it can search their socials directly.
 
+## Face verification on profiles (the "is it really them?" check)
+
+After social profiles are found, the tool downloads each profile's avatar/photo
+and compares it to the **face in your input image** with ArcFace, printing a
+FACE MATCH table: `MATCH` (≥90%), `LIKELY` (80-90%), or `unlikely`. This proves
+whether the face on that profile is the same person as your photo — independent
+of what the search engines happened to return.
+
+- Avatars that contain no measurable face are reported as `not measured`.
+- Disable with `FACE_PROFILE_VERIFY=false` in `.env`.
+
 ### Verify saved result
 
 ```bash

@@ -97,7 +97,10 @@ def _web_query(session: requests.Session, q: str) -> tuple[list[dict], str]:
 
 def _extract_name_from_titles(candidates: list[dict]) -> str:
     _EXCLUDE = {"has", "no", "not", "with", "for", "the", "and", "his", "her", "was", "are", "is", "will", "can", "may", "just", "new", "old", "all", "one", "two", "how", "why", "who", "what", "when", "where", "which", "that", "this", "from", "into", "over", "most", "best", "top", "only", "first", "last", "next", "day", "year", "time", "way", "see", "get", "got", "said", "says", "told", "says", "via", "vs", "de", "la", "le", "gets", "goes", "does", "says", "told", "tells", "makes", "takes", "gives", "shows", "says", "sees", "wants", "calls", "uses", "asks", "seems", "means", "needs", "feels", "says", "runs", "works", "wins", "loses", "dies", "born", "fired", "hired", "leaves", "joins", "moves", "says", "set", "puts", "cuts", "drops", "pulls", "pushes", "turns", "brings", "holds", "keeps", "lets", "pays", "sends", "sets", "throws", "uses", "wants"}
-    for c in candidates[:10]:
+    from collections import Counter
+
+    counts: Counter = Counter()
+    for c in candidates[:15]:
         title = c.get("title") or ""
         for m in re.finditer(r"\b([A-Z][a-z]+\s+[A-Z][a-z]+)\b", title):
             name = m.group(1)
@@ -107,8 +110,10 @@ def _extract_name_from_titles(candidates: list[dict]) -> str:
             if any(w.lower() in _EXCLUDE for w in words):
                 continue
             if len(name) >= 5:
-                return name
-    return ""
+                counts[name] += 1
+    if not counts:
+        return ""
+    return counts.most_common(1)[0][0]
 
 
 def _profile_url_matches(url: str, domain: str) -> str | None:

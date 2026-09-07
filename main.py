@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import re
 import sys
 import os
 import time
@@ -12,6 +13,7 @@ from rich.console import Console
 
 from config import (
     RESULTS_DIR, SIMILARITY_THRESHOLD_HIGH, SIMILARITY_THRESHOLD_MEDIUM, FACE_FIRST_SEARCH,
+    FACE_PROFILE_VERIFY,
 )
 from utils.image import validate_image, load_image, compute_file_hash, resolve_image_path
 from utils.logger import (
@@ -155,20 +157,36 @@ def run_search(
     images_analyzed = sum(1 for c in processed if c.get("local_path"))
     faces_found = sum(1 for c in processed if c.get("face_detected"))
     step_done(f"Images analyzed: {images_analyzed}, Faces detected: {faces_found}")
-    if processed:
+    if processed and faces_found == 0:
+        if crop_path and search_result["searched_image"] != "face-crop":
+            warn("Face-only query found no public image match.")
+            warn("The full-image results also contained no face photos — only product/ad pages.")
+        else:
+            warn("All results were product/ad pages (e.g. eyeglasses), not photos of this face.")
+            warn("These are not the person — all product results are discarded.")
+    elif processed:
         info(f"Rejected {len(processed) - faces_found} non-face results (products, ads, logos).")
     console.print()
 
     # Step 6: Face comparison & ranking
     step_header(6, TOTAL_STEPS, "Face comparison")
-    ranked = rank_candidates(embedding, processed)
-    step_done()
+    if faces_found == 0:
+        warn("No web search returned this person's face anywhere on the public internet.")
+        warn(
+            "Until a public photo of this face exists, no tool (Google, Lens, PimEyes) "
+            "can link this image to a social profile automatically."
+        )
+        step_done("(no faces to compare)")
+        ranked = []
+    else:
+        ranked = rank_candidates(embedding, processed)
+        step_done()
     console.print()
 
     if ranked:
         match_table(ranked[:10])
-    else:
-        warn("No candidate faces could be compared.")
+    elif faces_found > 0:
+        warn("No candidate faces exceeded the similarity threshold.")
     console.print()
 
     # Step 7: Extract social media profiles (face-matching results only)
@@ -189,11 +207,19 @@ def run_search(
         "designerframesoutlet.com", "specsavers.com", "oakley.com", "firmoo.com",
         "gentseyewear.com", "neweraeyecare.com", "ebay.com", "farfetch.com",
     }
+    _PRODUCT_DOMAIN_HINTS = ("eyewear", "glasses", "optical", "lens", "frames", "shop")
+    from urllib.parse import urlparse as _urlparse
+
     filtered_profiles: dict[str, set] = {}
     for plat, urls in social_profiles.items():
         for u in urls:
             handle = u.rstrip("/").split("/")[-1].lstrip("@")
+            domain = _urlparse(u).netloc.lower()
             if handle.lower() in _JUNK or handle.lower().startswith("marketplace."):
+                continue
+            if domain in _PRODUCT_DOMAINS:
+                continue
+            if any(h in domain for h in _PRODUCT_DOMAIN_HINTS):
                 continue
             filtered_profiles.setdefault(plat, set()).add(u)
     social_profiles = {p: sorted(u) for p, u in filtered_profiles.items()}
@@ -207,8 +233,8 @@ def run_search(
 
     subject_name = known_name.strip()
     inferred = False
-    if not subject_name and face_results:
-        subject_name = _extract_name_from_titles(face_results)
+    if not subject_name and raw_results:
+        subject_name = _extract_name_from_titles(raw_results)
         inferred = bool(subject_name)
 
     if not subject_name and not face_results and not social_profiles:
@@ -228,10 +254,38 @@ def run_search(
         discovered = discover_profiles_by_name(subject_name, seen_urls)
         for plat, urls in discovered.items():
             social_profiles.setdefault(plat, []).extend(u for u in urls if u not in social_profiles.get(plat, []))
-        profile_count = sum(len(v) for v in social_profiles.values())
         disp_error = getattr(discover_profiles_by_name, "last_error", "")
         if not discovered and disp_error:
             warn(f"Social discovery was blocked: {disp_error}")
+
+        # Name-aware filtering: drop off-topic handles (a random saved tweet
+        # like JFowlerESPN when looking for "Elon Musk") and dedupe impersonator
+        # accounts that mirror one base handle with numeric suffixes (the
+        # elonmusk.1723803 pattern). Keeps the cleanest profile per base.
+        _NumericSuffix = re.compile(r"[.\-_]\d{4,}.*$")
+        tokens = {w.lower() for w in re.split(r"\W+", subject_name) if len(w) >= 3}
+        cleaned: dict[str, list[str]] = {}
+        for plat, urls in social_profiles.items():
+            per_base: dict[str, list[str]] = {}
+            for u in urls:
+                handle = u.rstrip("/").split("/")[-1].lstrip("@")
+                base = (_NumericSuffix.sub("", handle).lower()
+                        .replace("_", "").replace("-", "").replace(".", ""))
+                if tokens and not any(t in base for t in tokens):
+                    continue
+                if handle.lower() in _JUNK:
+                    continue
+                clean = not _NumericSuffix.search(handle)
+                bucket = per_base.setdefault(base or handle.lower(), [])
+                bucket.append((u, clean))
+            flat: list[tuple[str, bool]] = []
+            for bucket in per_base.values():
+                bucket.sort(key=lambda x: (not x[1], len(x[0])))
+                flat.append(bucket[0])
+            flat.sort(key=lambda x: (not x[1], len(x[0])))
+            cleaned[plat] = [u for u, _ in flat[:3]]
+        social_profiles = {p: sorted(u) for p, u in cleaned.items() if u}
+        profile_count = sum(len(v) for v in social_profiles.values())
     elif face_results:
         warn("Named social discovery skipped (subject name not inferable).")
     step_done(f"Profiles found: {profile_count}")
@@ -239,9 +293,35 @@ def run_search(
         _print_profiles(social_profiles)
     elif not face_results:
         warn("No web image matched a face — no profiles to attribute.")
+        if not known_name.strip():
+            warn(
+                "Tip: if you know who this is, run with --name \"Person's Name\" "
+                "to search their socials directly."
+            )
     else:
         warn("No social media profile links found in face-matching results.")
     console.print()
+
+    # Face-to-profile verification: compare this photo's face against each
+    # discovered profile's avatar/photo to confirm the person behind the link.
+    profile_face_checks = []
+    if social_profiles and FACE_PROFILE_VERIFY:
+        step_header(7, TOTAL_STEPS, "Verifying faces on profile pages")
+        from search.profile_face import verify_profile_faces
+
+        profile_face_checks = verify_profile_faces(
+            embedding, social_profiles, encoder, detector, max_checks=12
+        )
+        matched = [c for c in profile_face_checks if c["status"] == "matched"]
+        step_done(
+            f"Profiles checked: {len(profile_face_checks)}, "
+            f"face matches: {len(matched)}"
+        )
+        if profile_face_checks:
+            face_verify_table(profile_face_checks)
+        else:
+            warn("Could not fetch any profile avatar to compare.")
+        console.print()
 
     # Step 8: Hash generation
     step_header(8, TOTAL_STEPS, "Generating verification hash")
@@ -249,21 +329,29 @@ def run_search(
     verification = VerificationResult(input_hash, ranked)
     verification.faces_detected = len(faces)
     verification.social_profiles = social_profiles
+    verification.profile_face_checks = profile_face_checks
     step_done(f"SHA-256: {verification.record_hash[:16]}...")
     console.print()
 
     # Step 9: Blockchain recording
     step_header(9, TOTAL_STEPS, "Recording blockchain proof")
     client = BlockchainClient()
-    if client.is_ready() and ranked:
-        top = ranked[0]
-        candidate_hash = top.get("url", "")
+    if client.is_ready():
+        if ranked:
+            top = ranked[0]
+            candidate_hash = top.get("url", "")
+            similarity = top.get("face_similarity", 0.0)
+            matched = True
+        else:
+            candidate_hash = ""
+            similarity = 0.0
+            matched = False
         result = client.record_verification(
             verification.record_hash,
             input_hash,
             candidate_hash,
-            top.get("face_similarity", 0.0),
-            True,
+            similarity,
+            matched,
         )
         if result["success"]:
             verification.set_blockchain("sepolia", result["transaction_hash"])
@@ -301,6 +389,34 @@ def _print_profiles(social_profiles: dict):
         for url in social_profiles[platform]:
             idx += 1
             console.print(f"   [bold]{platform:<12}[/bold] {url}")
+    console.print()
+
+
+def face_verify_table(checks: list[dict]):
+    console.print()
+    console.print("[bold yellow]  FACE MATCH ON PROFILE PAGES — is the face in your photo the same "
+                  "person on these profiles?[/bold yellow]")
+    console.print()
+    for c in checks[:12]:
+        sim = c.get("face_similarity")
+        if sim is None:
+            sim_text = "not measured"
+        else:
+            sim_text = f"{sim:.1%}"
+        cls = c.get("classification") or "--"
+        status = c.get("status", "")
+        if sim is not None and sim >= 0.90:
+            mark = "[green]MATCH[/green]"
+        elif sim is not None and sim >= 0.80:
+            mark = "[yellow]LIKELY[/yellow]"
+        elif sim is not None:
+            mark = "[red]unlikely[/red]"
+        else:
+            mark = "[dim]--[/dim]"
+        console.print(
+            f"   {mark}  {sim_text:<12} {cls:<6} {c.get('platform',''):<12} "
+            f"{c.get('url','')}  [{status}]"
+        )
     console.print()
 
 

@@ -34,6 +34,7 @@ FACE_FIRST_SEARCH = os.getenv("FACE_FIRST_SEARCH", "true").strip().lower() == "t
 GOOGLE_LENS = os.getenv("GOOGLE_LENS", "true").strip().lower() == "true"
 GOOGLE_CSE_KEY = os.getenv("GOOGLE_CSE_KEY", "")
 GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID", "")
+FACE_PROFILE_VERIFY = os.getenv("FACE_PROFILE_VERIFY", "true").strip().lower() == "true"
 
 RPC_URL = os.getenv("RPC_URL", "https://ethereum-sepolia-rpc.publicnode.com")
 PRIVATE_KEY = os.getenv("PRIVATE_KEY", "")
